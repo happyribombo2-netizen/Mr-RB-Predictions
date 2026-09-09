@@ -1,0 +1,219 @@
+name: Build Mr RB Predictions V12 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Find V12 ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . -type f \
+            -name 'Mr_RB_Predictions_V12_REAL_DATA_BRIDGE.zip' \
+            | head -1)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: V12 ZIP not found."
+            exit 1
+          fi
+
+          echo "Found: $ZIP"
+
+          mkdir -p project
+          unzip -q -o "$ZIP" -d project
+
+      - name: Find Android project
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find "$GITHUB_WORKSPACE/project" \
+            -type f \
+            \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+            | head -1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Android project not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+          fi
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          test -d "$PROJECT_DIR/app"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/app/src/main/assets/index.html"
+
+          echo "Android project OK."
+
+      - name: Verify Mr RB features
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          grep -qi "Mr RB Predictions" "$HTML"
+          grep -qiE "1[-–]5 Minute Draw" "$HTML"
+          grep -qiE "1[-–]10 Minute Draw" "$HTML"
+          grep -qiE "1[-–]15 Minute Draw" "$HTML"
+          grep -qi "Penalty Yes/No" "$HTML"
+          grep -qi "Tennis" "$HTML"
+          grep -qi "Golf" "$HTML"
+          grep -qi "Rugby" "$HTML"
+          grep -qi "Cricket" "$HTML"
+
+          echo "Mr RB feature check PASSED."
+
+      - name: Validate JavaScript
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          python3 - "$HTML" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          html = Path(sys.argv[1]).read_text(
+              encoding="utf-8"
+          )
+
+          scripts = re.findall(
+              r"<script\b[^>]*>(.*?)</script>",
+              html,
+              flags=re.I | re.S
+          )
+
+          if not scripts:
+              raise SystemExit("No JavaScript found.")
+
+          for i, script in enumerate(scripts):
+              path = Path(f"/tmp/mrrb_{i}.js")
+              path.write_text(script, encoding="utf-8")
+              print(f"Checking {path}")
+
+              import subprocess
+
+              result = subprocess.run(
+                  ["node", "--check", str(path)]
+              )
+
+              if result.returncode != 0:
+                  raise SystemExit(
+                      f"JavaScript error in block {i}"
+                  )
+
+          print("JavaScript validation PASSED.")
+          PY
+
+      - name: Validate Personal API
+        shell: bash
+        run: |
+          set -e
+
+          API_DIR="$PROJECT_DIR/mr-rb-api"
+
+          if [ ! -d "$API_DIR" ]; then
+            echo "Personal API folder not inside Android project."
+            echo "Continuing with APK build."
+            exit 0
+          fi
+
+          if [ -f "$API_DIR/src/server.js" ]; then
+            node --check "$API_DIR/src/server.js"
+          fi
+
+          if [ -f "$API_DIR/src/providers.js" ]; then
+            node --check "$API_DIR/src/providers.js"
+          fi
+
+          if [ -f "$API_DIR/src/self-test.js" ]; then
+            node "$API_DIR/src/self-test.js"
+          fi
+
+          echo "Personal API validation PASSED."
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f gradlew ]; then
+            ./gradlew --no-daemon --stacktrace assembleDebug
+          else
+            gradle --no-daemon --stacktrace assembleDebug
+          fi
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -path "*/build/outputs/apk/*" \
+            | head -1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          mkdir -p final-apk
+
+          cp "$APK" \
+            final-apk/Mr_RB_Predictions.apk
+
+          ls -lh final-apk/Mr_RB_Predictions.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr-RB-Predictions-V12-APK
+          path: final-apk/Mr_RB_Predictions.apk
+          if-no-files-found: error

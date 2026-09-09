@@ -1,0 +1,287 @@
+name: Build Mr RB Predictions APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Mr RB Predictions
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract V12 package
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . -type f \
+            \( -name 'Mr_RB_Predictions_V12_REAL_DATA_BRIDGE.zip' \
+            -o -name '*V12*REAL_DATA_BRIDGE*.zip' \
+            \) | head -1)
+
+          if [ -z "$ZIP" ]; then
+            ZIP=$(find . -type f \
+              -iname 'Mr_RB_Predictions*.zip' | head -1)
+          fi
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: Mr RB ZIP package not found."
+            exit 1
+          fi
+
+          echo "Using package: $ZIP"
+
+          mkdir -p "$GITHUB_WORKSPACE/project"
+
+          unzip -q -o "$ZIP" \
+            -d "$GITHUB_WORKSPACE/project"
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find "$GITHUB_WORKSPACE/project" \
+            -type f \
+            \( -name 'settings.gradle' \
+            -o -name 'settings.gradle.kts' \) \
+            | head -1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Android settings.gradle not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          test -d "$PROJECT_DIR/app"
+
+          test -f \
+            "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          test -f \
+            "$PROJECT_DIR/app/src/main/assets/index.html"
+
+          echo "Android project verification PASSED."
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+          fi
+
+      - name: Verify Mr RB features
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          echo "Checking Mr RB Predictions..."
+
+          grep -qi "Mr RB Predictions" "$HTML"
+
+          # Minute draw markets
+          grep -qiE "1[-–]5 Minute Draw" "$HTML"
+          grep -qiE "1[-–]10 Minute Draw" "$HTML"
+          grep -qiE "1[-–]15 Minute Draw" "$HTML"
+
+          # Penalty market
+          grep -qi "Penalty Yes/No" "$HTML"
+
+          # Major sports
+          grep -qi "Tennis" "$HTML"
+          grep -qi "Golf" "$HTML"
+          grep -qi "Rugby" "$HTML"
+          grep -qi "Cricket" "$HTML"
+
+          echo "Required features PASSED."
+
+      - name: Verify no old API key blocker
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          if grep -qi \
+            "Connect the secure Mr RB Sports API first" \
+            "$HTML"; then
+
+            echo "ERROR: Old API blocker detected."
+            exit 1
+          fi
+
+          echo "API blocker check PASSED."
+
+      - name: Validate JavaScript
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          mkdir -p "$GITHUB_WORKSPACE/jscheck"
+
+          python3 - "$HTML" "$GITHUB_WORKSPACE/jscheck" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          html = Path(sys.argv[1]).read_text(
+              encoding="utf-8"
+          )
+
+          output = Path(sys.argv[2])
+
+          scripts = re.findall(
+              r"<script\b[^>]*>(.*?)</script>",
+              html,
+              flags=re.I | re.S
+          )
+
+          if not scripts:
+              raise SystemExit(
+                  "No JavaScript blocks found."
+              )
+
+          for i, script in enumerate(scripts):
+              path = output / f"script_{i}.js"
+              path.write_text(
+                  script,
+                  encoding="utf-8"
+              )
+              print(f"Created {path}")
+          PY
+
+          for JS in "$GITHUB_WORKSPACE"/jscheck/*.js
+          do
+            echo "Checking $JS"
+            node --check "$JS"
+          done
+
+          echo "JavaScript validation PASSED."
+
+      - name: Validate Mr RB Personal API
+        shell: bash
+        run: |
+          set -e
+
+          API_DIR="$GITHUB_WORKSPACE/project/mr-rb-api"
+
+          if [ ! -d "$API_DIR" ]; then
+            echo "Mr RB API directory not found."
+            echo "APK build will continue."
+            exit 0
+          fi
+
+          echo "Mr RB API found."
+
+          if [ -f "$API_DIR/src/server.js" ]; then
+            node --check \
+              "$API_DIR/src/server.js"
+          fi
+
+          if [ -f "$API_DIR/src/providers.js" ]; then
+            node --check \
+              "$API_DIR/src/providers.js"
+          fi
+
+          if [ -f "$API_DIR/src/self-test.js" ]; then
+            node \
+              "$API_DIR/src/self-test.js"
+          fi
+
+          echo "Mr RB API validation PASSED."
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              assembleDebug
+          else
+            gradle \
+              --no-daemon \
+              --stacktrace \
+              assembleDebug
+          fi
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -path "*/build/outputs/apk/*" \
+            | head -1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/final-apk"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/final-apk/Mr_RB_Predictions.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr-RB-Predictions-APK
+          path: final-apk/Mr_RB_Predictions.apk
+          if-no-files-found: error
+
+      - name: Upload Personal API
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr-RB-Personal-API
+          path: ${{ env.PROJECT_DIR }}/../mr-rb-api
+          if-no-files-found: warn

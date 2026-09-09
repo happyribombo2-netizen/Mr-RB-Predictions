@@ -1,0 +1,166 @@
+name: Build Mr RB Predictions APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract build package
+        shell: bash
+        run: |
+          set -e
+
+          echo "Repository contents:"
+          find . -maxdepth 3 -type f | sort | head -300
+
+          ZIP_FILE=$(find . -maxdepth 3 -type f \
+            \( -name "*.zip" -o -name "*BUILD_PACKAGE*.zip" \) \
+            | head -1 || true)
+
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found package: $ZIP_FILE"
+
+            mkdir -p extracted
+
+            unzip -o "$ZIP_FILE" -d extracted
+
+            echo "Extracted contents:"
+            find extracted -maxdepth 5 -type f | sort | head -500
+
+            if find extracted -type f -name "settings.gradle" -o \
+               -type f -name "settings.gradle.kts" | grep -q .; then
+
+              PROJECT_DIR=$(dirname "$(find extracted -type f \
+                \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+                | head -1)")
+
+              echo "Android project found at: $PROJECT_DIR"
+
+              cp -R "$PROJECT_DIR"/. .
+
+            else
+              echo "No settings.gradle found inside ZIP."
+            fi
+          fi
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for Android project..."
+
+          SETTINGS=$(find . -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            ! -path "./.git/*" \
+            | head -1 || true)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Android project not found."
+            find . -maxdepth 6 -type f | sort | head -500
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project:"
+          find "$PROJECT_DIR" -maxdepth 5 -type f | sort | head -500
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking Android project..."
+
+          test -f "$PROJECT_DIR/settings.gradle" || \
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+
+          test -f "$PROJECT_DIR/app/build.gradle" || \
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          echo "Android project verification passed."
+
+      - name: Check JavaScript
+        shell: bash
+        run: |
+          set -e
+
+          HTML_FILE=$(find "$PROJECT_DIR/app/src/main/assets" \
+            -type f -name "*.html" | head -1 || true)
+
+          if [ -n "$HTML_FILE" ]; then
+            echo "Checking: $HTML_FILE"
+
+            node --check "$HTML_FILE" 2>/dev/null || true
+          fi
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew clean assembleDebug --stacktrace
+          else
+            gradle clean assembleDebug --stacktrace
+          fi
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for APK..."
+
+          find "$PROJECT_DIR" -type f -name "*.apk" -print
+
+          APK=$(find "$PROJECT_DIR" -type f \
+            -name "*debug*.apk" | head -1 || true)
+
+          if [ -z "$APK" ]; then
+            APK=$(find "$PROJECT_DIR" -type f \
+              -name "*.apk" | head -1 || true)
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not produced."
+            exit 1
+          fi
+
+          echo "APK found: $APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          cp "$APK" "$GITHUB_WORKSPACE/apk-output/Mr-RB-Predictions.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr-RB-Predictions-APK
+          path: apk-output/Mr-RB-Predictions.apk
+          if-no-files-found: error

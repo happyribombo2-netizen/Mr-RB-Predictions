@@ -1,0 +1,227 @@
+name: Build Mr RB Predictions V13 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Mr RB Predictions
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # 1. Get repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Find and extract V13 package
+      - name: Extract V13 package
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . -type f \
+            -name 'Mr_RB_Predictions_V13_AUTO_NO_KEY_BLOCKER.zip' \
+            | head -1)
+
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: V13 package not found."
+            exit 1
+          fi
+
+          echo "Using:"
+          echo "$ZIP"
+
+          mkdir -p "$GITHUB_WORKSPACE/mrrb"
+
+          unzip -q -o "$ZIP" \
+            -d "$GITHUB_WORKSPACE/mrrb"
+
+          echo "Package extracted."
+
+      # 3. Find Android project
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find "$GITHUB_WORKSPACE/mrrb" \
+            -type f \
+            \( -name 'settings.gradle' \
+            -o -name 'settings.gradle.kts' \) \
+            | head -1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Android project not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      # 4. Check required Android files
+      - name: Check Android project
+        shell: bash
+        run: |
+          set -e
+
+          test -d "$PROJECT_DIR/app"
+          test -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/app/src/main/assets/index.html"
+
+          echo "Android project is valid."
+
+      # 5. Java
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 6. Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 7. Prepare Gradle
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            echo "Gradle wrapper ready."
+          else
+            echo "No Gradle wrapper found."
+          fi
+
+      # 8. Check important Mr RB features
+      - name: Check Mr RB features
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          grep -qi "Mr RB Predictions" "$HTML"
+
+          grep -qiE "1[-–]5 Minute Draw" "$HTML"
+          grep -qiE "1[-–]10 Minute Draw" "$HTML"
+          grep -qiE "1[-–]15 Minute Draw" "$HTML"
+
+          grep -qi "Penalty Yes/No" "$HTML"
+
+          grep -qi "Tennis" "$HTML"
+          grep -qi "Golf" "$HTML"
+          grep -qi "Rugby" "$HTML"
+          grep -qi "Cricket" "$HTML"
+
+          echo "Mr RB feature check PASSED."
+
+      # 9. Check JavaScript
+      - name: Validate JavaScript
+        shell: bash
+        run: |
+          set -e
+
+          HTML="$PROJECT_DIR/app/src/main/assets/index.html"
+
+          python3 - "$HTML" <<'PY'
+          import re
+          import sys
+          import subprocess
+          from pathlib import Path
+
+          html = Path(sys.argv[1]).read_text(
+              encoding="utf-8"
+          )
+
+          scripts = re.findall(
+              r"<script\b[^>]*>(.*?)</script>",
+              html,
+              flags=re.I | re.S
+          )
+
+          if not scripts:
+              raise SystemExit("No JavaScript found.")
+
+          for i, script in enumerate(scripts):
+              path = Path(f"/tmp/mrrb_script_{i}.js")
+              path.write_text(script, encoding="utf-8")
+
+              result = subprocess.run(
+                  ["node", "--check", str(path)]
+              )
+
+              if result.returncode != 0:
+                  raise SystemExit(
+                      f"JavaScript validation failed: block {i}"
+                  )
+
+          print("JavaScript validation PASSED.")
+          PY
+
+      # 10. Build APK
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f gradlew ]; then
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              assembleDebug
+          else
+            gradle \
+              --no-daemon \
+              --stacktrace \
+              assembleDebug
+          fi
+
+      # 11. Find APK
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -path "*/build/outputs/apk/*" \
+            | head -1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not created."
+            exit 1
+          fi
+
+          echo "APK:"
+          echo "$APK"
+
+          mkdir -p "$GITHUB_WORKSPACE/final-apk"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/final-apk/Mr_RB_Predictions_V13.apk"
+
+          ls -lh \
+            "$GITHUB_WORKSPACE/final-apk/Mr_RB_Predictions_V13.apk"
+
+      # 12. Upload APK
+      - name: Upload Mr RB Predictions APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr-RB-Predictions-V13-APK
+          path: final-apk/Mr_RB_Predictions_V13.apk
+          if-no-files-found: error

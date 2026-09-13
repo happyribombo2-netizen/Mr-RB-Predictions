@@ -1,0 +1,277 @@
+name: Build Mr RB Predictions V15
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find V15 ZIP
+        id: find_zip
+        shell: bash
+        run: |
+          set -e
+
+          ZIP=$(find . -type f \
+            -name 'Mr_RB_Predictions_V15_COMPLETE_REDESIGN.zip' \
+            -print -quit)
+
+          if [ -z "$ZIP" ]; then
+            echo "V15 ZIP not found."
+            echo "Files found:"
+            find . -maxdepth 4 -type f | head -200
+            exit 1
+          fi
+
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Found: $ZIP"
+
+      - name: Extract V15 project
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p v15_source
+
+          unzip -q "${{ steps.find_zip.outputs.zip }}" -d v15_source
+
+          echo "Extracted V15:"
+          find v15_source -maxdepth 5 -type f | head -200
+
+      - name: Locate Android project
+        id: android_project
+        shell: bash
+        run: |
+          set -e
+
+          SETTINGS=$(find v15_source -type f -name settings.gradle -print -quit)
+
+          if [ -z "$SETTINGS" ]; then
+            SETTINGS=$(find v15_source -type f -name settings.gradle.kts -print -quit)
+          fi
+
+          if [ -z "$SETTINGS" ]; then
+            echo "Android settings.gradle/settings.gradle.kts not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Verify Mr RB project
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking Android project..."
+
+          test -f settings.gradle -o -f settings.gradle.kts
+          test -f app/build.gradle -o -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+
+          echo "Android project structure OK."
+
+      - name: Verify Mr RB branding and redesign
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          HTML=$(find app/src/main/assets -type f -name '*.html' -print -quit)
+
+          if [ -z "$HTML" ]; then
+            echo "Main HTML interface not found."
+            exit 1
+          fi
+
+          grep -qi "Mr RB Predictions" "$HTML"
+          grep -qi "Prediction" "$HTML"
+          grep -qi "Markets" "$HTML"
+
+          echo "Mr RB branding and redesigned interface detected."
+
+      - name: Verify all sports and markets
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          HTML=$(find app/src/main/assets -type f -name '*.html' -print -quit)
+
+          echo "Checking important sports..."
+
+          grep -qi "Football" "$HTML"
+          grep -qi "Rugby" "$HTML"
+          grep -qi "Tennis" "$HTML"
+          grep -qi "Golf" "$HTML"
+          grep -qi "Basketball" "$HTML"
+          grep -qi "Cricket" "$HTML"
+
+          echo "Checking important markets..."
+
+          grep -Eq "1[-–]5" "$HTML"
+          grep -Eq "1[-–]10" "$HTML"
+          grep -Eq "1[-–]15" "$HTML"
+
+          grep -qi "1X2" "$HTML"
+          grep -qi "Double Chance" "$HTML"
+          grep -qi "Draw No Bet" "$HTML"
+          grep -qi "Handicap" "$HTML"
+          grep -qi "Over" "$HTML"
+          grep -qi "BTTS" "$HTML"
+          grep -qi "Correct Score" "$HTML"
+          grep -qi "Half-time" "$HTML"
+          grep -qi "Second-half" "$HTML"
+          grep -qi "Corners" "$HTML"
+          grep -qi "Cards" "$HTML"
+
+          echo "Sports and market verification passed."
+
+      - name: Verify no API key entry screen
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          HTML=$(find app/src/main/assets -type f -name '*.html' -print -quit)
+
+          if grep -qiE \
+            'Save your API key|Enter API key|API key.*input|type=["'\'']password["'\''].*API' \
+            "$HTML"; then
+
+            echo "Visible API-key entry UI detected."
+            exit 1
+          fi
+
+          echo "No visible API-key entry screen detected."
+
+      - name: Verify touch handling
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          HTML=$(find app/src/main/assets -type f -name '*.html' -print -quit)
+
+          grep -qi "touchend" "$HTML"
+
+          echo "Android WebView touch handling detected."
+
+      - name: Check JavaScript syntax
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          HTML=$(find app/src/main/assets -type f -name '*.html' -print -quit)
+
+          python3 - "$HTML" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          html_path = sys.argv[1]
+
+          with open(html_path, "r", encoding="utf-8") as f:
+              html = f.read()
+
+          scripts = re.findall(
+              r"<script\b[^>]*>(.*?)</script>",
+              html,
+              flags=re.I | re.S
+          )
+
+          if not scripts:
+              raise SystemExit("No JavaScript found.")
+
+          for i, script in enumerate(scripts, 1):
+              if not script.strip():
+                  continue
+
+              result = subprocess.run(
+                  ["node", "--check"],
+                  input=script,
+                  text=True,
+                  capture_output=True
+              )
+
+              if result.returncode != 0:
+                  print(result.stderr)
+                  raise SystemExit(
+                      f"JavaScript syntax error in script {i}"
+                  )
+
+          print("JavaScript syntax check passed.")
+          PY
+
+      - name: Build debug APK
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          gradle --version
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            assembleDebug
+
+      - name: Find APK
+        id: find_apk
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        shell: bash
+        run: |
+          set -e
+
+          APK=$(find app/build/outputs/apk -type f -name '*.apk' -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "APK was not produced."
+            find app/build -type f | head -200
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/release"
+
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/release/Mr_RB_Predictions_V15.apk"
+
+          echo "APK created:"
+          ls -lh "$GITHUB_WORKSPACE/release/Mr_RB_Predictions_V15.apk"
+
+      - name: Upload V15 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mr-RB-Predictions-V15-APK
+          path: release/Mr_RB_Predictions_V15.apk
+          if-no-files-found: error
+          retention-days: 30
